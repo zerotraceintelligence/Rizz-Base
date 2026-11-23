@@ -20,6 +20,19 @@ export interface StudioBackupInfo {
   yapCount: number
 }
 
+export interface StudioEvent {
+  id: string
+  kind: string
+  source?: string
+  createdAt: string
+  data: unknown
+}
+
+export interface StudioEventPage {
+  events: StudioEvent[]
+  nextCursor: string
+}
+
 interface StudioBackend {
   ChooseProjectToOpen(): Promise<string>
   ChooseProjectToCreate(): Promise<string>
@@ -47,6 +60,8 @@ interface StudioBackend {
   CreateYap(lobbyId: string, yapId: string, data: string): Promise<Yap>
   UpdateYap(lobbyId: string, yapId: string, data: string): Promise<Yap>
   DeleteYap(lobbyId: string, yapId: string): Promise<void>
+  AppendEvent(kind: string, source: string, data: string): Promise<StudioEvent>
+  QueryEvents(limit: number, cursor: string): Promise<StudioEventPage>
   ExportBackup(path: string): Promise<void>
 }
 

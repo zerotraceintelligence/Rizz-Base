@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react"
 import {
   studioBackend,
   type StudioBackupInfo,
+  type StudioEvent,
   type StudioLobby,
   type StudioProject,
 } from "./studio-api"
@@ -77,18 +78,64 @@ const previewYapsByLobby: Record<string, Yap[]> = {
   ],
 }
 
+const previewEvents: StudioEvent[] = [
+  {
+    id: "evt_demo_02",
+    kind: "project.opened",
+    source: "studio",
+    createdAt: "2026-11-14T10:42:18Z",
+    data: { project_id: "rb_demo", version: 1 },
+  },
+  {
+    id: "evt_demo_01",
+    kind: "note.created",
+    source: "example",
+    createdAt: "2026-11-14T10:41:52Z",
+    data: { id: "welcome", title: "Hello, local events" },
+  },
+]
+
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  const message = error instanceof Error ? error.message : String(error)
+  const normalized = message.toLowerCase()
+  if (normalized.includes("incorrect passphrase or damaged project")) {
+    return "That passphrase didn't unlock this Project. Check it and try again. If you're sure it's correct, restore from a backup."
+  }
+  if (normalized.includes("project is locked by pid")) {
+    return "Another Rizzbase process is using this Project. Close it there, then try again."
+  }
+  if (normalized.includes("open a project first")) {
+    return "Open or create a Project before continuing."
+  }
+  if (normalized.includes("must end in .rizz")) {
+    return "Choose a Project file ending in .rizz."
+  }
+  if (normalized.includes("must end in .json")) {
+    return "Choose a JSON backup file ending in .json."
+  }
+  if (normalized.includes("file already exists")) {
+    return "A file with that name already exists. Choose a different destination."
+  }
+  if (normalized.includes("valid json")) {
+    return "Check the JSON syntax and try again."
+  }
+  return message
 }
 
 function prettyJSON(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
+function studioAsset(path: string): string {
+  return `${import.meta.env.BASE_URL}${path}`
+}
+
 export default function Studio({ preview = false }: { preview?: boolean }) {
   const [project, setProject] = useState<StudioProject | null>(
     preview ? previewProject : null,
   )
+  const [projectLoading, setProjectLoading] = useState(!preview)
+  const [section, setSection] = useState<"data" | "events">("data")
   const [lobbies, setLobbies] = useState<StudioLobby[]>(
     preview ? previewLobbies : [],
   )
@@ -96,6 +143,13 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
     preview ? (previewLobbies[0]?.id ?? "") : "",
   )
   const [yaps, setYaps] = useState<Yap[]>(preview ? previewYaps : [])
+  const [yapsLoading, setYapsLoading] = useState(false)
+  const [events, setEvents] = useState<StudioEvent[]>(
+    preview ? previewEvents : [],
+  )
+  const [eventCursor, setEventCursor] = useState("")
+  const [eventHasMore, setEventHasMore] = useState(false)
+  const [eventsLoading, setEventsLoading] = useState(false)
   const [projectAction, setProjectAction] = useState<ProjectAction | null>(null)
   const [projectPath, setProjectPath] = useState("")
   const [backupPath, setBackupPath] = useState("")
@@ -110,6 +164,10 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
   const [yapJSON, setYapJSON] = useState("{}")
   const [newLobbyName, setNewLobbyName] = useState("")
   const [showLobbyForm, setShowLobbyForm] = useState(false)
+  const [showEventForm, setShowEventForm] = useState(false)
+  const [eventKind, setEventKind] = useState("")
+  const [eventSource, setEventSource] = useState("studio")
+  const [eventJSON, setEventJSON] = useState("{\n  \n}")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
@@ -117,7 +175,7 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
   const dialogOpenerRef = useRef<HTMLElement | null>(null)
   const busyRef = useRef(false)
   const dialogOpen = Boolean(
-    projectAction || showLobbyForm || isNewYap || editingYap,
+    projectAction || showLobbyForm || showEventForm || isNewYap || editingYap,
   )
 
   function rememberDialogOpener() {
@@ -148,6 +206,7 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
         setPassphrase("")
         setBackupSummary(null)
         setShowLobbyForm(false)
+        setShowEventForm(false)
         setIsNewYap(false)
         setEditingYap(null)
         setError("")
@@ -189,6 +248,24 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
   }, [dialogOpen])
 
   useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (dialogOpen || busyRef.current || !(event.ctrlKey || event.metaKey)) {
+        return
+      }
+      if (event.key.toLowerCase() === "o") {
+        event.preventDefault()
+        void chooseProject("open")
+      } else if (event.key.toLowerCase() === "n") {
+        event.preventDefault()
+        void chooseProject("create")
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [dialogOpen])
+
+  useEffect(() => {
     if (preview) return
     let active = true
     try {
@@ -205,8 +282,12 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
         .catch((cause: unknown) => {
           if (active) setError(errorMessage(cause))
         })
+        .finally(() => {
+          if (active) setProjectLoading(false)
+        })
     } catch (cause) {
       setError(errorMessage(cause))
+      setProjectLoading(false)
     }
     return () => {
       active = false
@@ -220,9 +301,11 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
     }
     if (!activeLobbyID) {
       setYaps([])
+      setYapsLoading(false)
       return
     }
     let active = true
+    setYapsLoading(true)
     studioBackend()
       .ListYaps(activeLobbyID)
       .then((rows) => {
@@ -231,10 +314,48 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
       .catch((cause: unknown) => {
         if (active) setError(errorMessage(cause))
       })
+      .finally(() => {
+        if (active) setYapsLoading(false)
+      })
     return () => {
       active = false
     }
   }, [activeLobbyID, preview])
+
+  useEffect(() => {
+    if (section !== "events") return
+    if (preview) {
+      setEvents(previewEvents)
+      setEventCursor("")
+      setEventHasMore(false)
+      return
+    }
+
+    let active = true
+    setEventsLoading(true)
+    try {
+      studioBackend()
+        .QueryEvents(50, "")
+        .then((page) => {
+          if (!active) return
+          setEvents(page.events)
+          setEventCursor(page.nextCursor)
+          setEventHasMore(Boolean(page.nextCursor))
+        })
+        .catch((cause: unknown) => {
+          if (active) setError(errorMessage(cause))
+        })
+        .finally(() => {
+          if (active) setEventsLoading(false)
+        })
+    } catch (cause) {
+      setError(errorMessage(cause))
+      setEventsLoading(false)
+    }
+    return () => {
+      active = false
+    }
+  }, [preview, section])
 
   async function run(action: () => Promise<void>) {
     busyRef.current = true
@@ -312,6 +433,7 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
       const rows = await backend.ListLobbies()
       setLobbies(rows)
       setActiveLobbyID(rows[0]?.id ?? "")
+      setSection("data")
     })
   }
 
@@ -322,6 +444,10 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
       setLobbies([])
       setActiveLobbyID("")
       setYaps([])
+      setEvents([])
+      setEventCursor("")
+      setEventHasMore(false)
+      setSection("data")
     })
   }
 
@@ -359,7 +485,12 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
   async function saveYap(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     await run(async () => {
-      const data: unknown = JSON.parse(yapJSON)
+      let data: unknown
+      try {
+        data = JSON.parse(yapJSON)
+      } catch {
+        throw new Error("Check the JSON syntax and try again.")
+      }
       const normalized = prettyJSON(data)
       if (isNewYap) {
         await studioBackend().CreateYap(activeLobbyID, yapID, normalized)
@@ -375,6 +506,60 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
       setYaps(await studioBackend().ListYaps(activeLobbyID))
       setLobbies(await studioBackend().ListLobbies())
     })
+  }
+
+  function startCreateEvent() {
+    rememberDialogOpener()
+    setEventKind("")
+    setEventSource("studio")
+    setEventJSON("{\n  \n}")
+    setError("")
+    setShowEventForm(true)
+  }
+
+  async function appendEvent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    await run(async () => {
+      let data: unknown
+      try {
+        data = JSON.parse(eventJSON)
+      } catch {
+        throw new Error("Check the event JSON syntax and try again.")
+      }
+      const created = await studioBackend().AppendEvent(
+        eventKind,
+        eventSource,
+        prettyJSON(data),
+      )
+      setEvents((current) =>
+        current.some((item) => item.id === created.id)
+          ? current
+          : [...current, created],
+      )
+      setShowEventForm(false)
+      setNotice("Event appended. Events are immutable once saved.")
+    })
+  }
+
+  async function loadMoreEvents() {
+    if (!eventCursor || eventsLoading) return
+    setEventsLoading(true)
+    try {
+      const page = await studioBackend().QueryEvents(50, eventCursor)
+      setEvents((current) => {
+        const existing = new Set(current.map((item) => item.id))
+        return [
+          ...current,
+          ...page.events.filter((item) => !existing.has(item.id)),
+        ]
+      })
+      setEventCursor(page.nextCursor)
+      setEventHasMore(Boolean(page.nextCursor))
+    } catch (cause) {
+      setError(errorMessage(cause))
+    } finally {
+      setEventsLoading(false)
+    }
   }
 
   async function deleteYap(yap: Yap) {
@@ -402,6 +587,13 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
   }
 
   async function exportBackup() {
+    if (
+      !window.confirm(
+        "Export an unencrypted JSON copy of this Project? Anyone with access to that file can read its data. Continue only if you can store it securely.",
+      )
+    ) {
+      return
+    }
     await run(async () => {
       const safeName = project?.name
         .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
@@ -416,32 +608,41 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
     })
   }
 
+  if (!project && projectLoading) {
+    return (
+      <main className="studio-root studio-start">
+        <p className="studio-start-loading" role="status">
+          Checking for an open Project…
+        </p>
+      </main>
+    )
+  }
+
   if (!project) {
     return (
       <main className="studio-root studio-start">
         <header className="studio-brand">
           <img
             className="studio-brand-mark"
-            src="/brand/rizzbase-mark-light.svg"
+            src={studioAsset("brand/rizzbase-mark-light.svg")}
             alt=""
           />
           <img
             className="studio-brand-wordmark"
-            src="/brand/rizzbase-wordmark-on-light.svg"
+            src={studioAsset("brand/rizzbase-wordmark-on-light.svg")}
             alt="Rizzbase"
           />
           <span className="studio-product-label">STUDIO</span>
         </header>
         <section className="studio-empty-card">
-          <span className="studio-eyebrow">LOCAL-FIRST DATABASE WORKSPACE</span>
+          <span className="studio-eyebrow">START WITH A PROJECT</span>
           <h1>
-            Your Projects,
-            <br />
-            on your machine.
+            Create or open
+            <br />a Project.
           </h1>
           <p>
-            Create or open a Project, or restore a JSON backup into a new
-            encrypted file. Nothing is uploaded.
+            A Project is one encrypted file stored on your device. Choose what
+            to do next; nothing is uploaded.
           </p>
           <div className="studio-start-actions">
             <button
@@ -450,7 +651,7 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
               disabled={busy}
               onClick={() => void chooseProject("create")}
             >
-              CREATE PROJECT
+              NEW PROJECT
             </button>
             <button
               type="button"
@@ -458,7 +659,7 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
               disabled={busy}
               onClick={() => void chooseProject("open")}
             >
-              OPEN PROJECT
+              OPEN EXISTING
             </button>
             <button
               type="button"
@@ -476,9 +677,13 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
               recovery.
             </small>
             <small>
-              Questions? <a href="mailto:hello@rizzbase.tech">hello@rizzbase.tech</a>
+              Questions?{" "}
+              <a href="mailto:hello@rizzbase.tech">hello@rizzbase.tech</a>
               {" · "}
               <a href="mailto:paul@rizzbase.tech">paul@rizzbase.tech</a>
+            </small>
+            <small>
+              Shortcuts: Ctrl+N for a new Project, Ctrl+O to open one.
             </small>
           </div>
         </section>
@@ -609,10 +814,10 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
               </label>
               <p className="studio-form-hint">
                 {projectAction === "open"
-                  ? "The passphrase is kept in app memory only until you close the Project or quit Studio."
+                  ? "Enter the passphrase you chose when you created this Project. It unlocks the file and cannot be recovered if forgotten."
                   : projectAction === "restore"
-                    ? "This decrypted JSON backup will be encrypted with your new passphrase. Keep the backup file protected."
-                    : "Choose a strong new passphrase. It encrypts this Project and cannot be recovered if lost."}
+                    ? "Your backup is readable JSON. Choose a strong passphrase to encrypt the restored Project; the original backup stays unencrypted."
+                    : "This is the key to your Project file. Choose a long, unique passphrase and keep it safe; it cannot be recovered if lost."}
               </p>
               <button
                 type="submit"
@@ -644,12 +849,12 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
         <header className="studio-brand">
           <img
             className="studio-brand-mark"
-            src="/brand/rizzbase-mark-light.svg"
+            src={studioAsset("brand/rizzbase-mark-light.svg")}
             alt=""
           />
           <img
             className="studio-brand-wordmark"
-            src="/brand/rizzbase-wordmark-on-light.svg"
+            src={studioAsset("brand/rizzbase-wordmark-on-light.svg")}
             alt="Rizzbase"
           />
           <span className="studio-product-label">STUDIO</span>
@@ -659,68 +864,91 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
           <strong>{project.name}</strong>
           <small title={project.path}>{project.path}</small>
         </div>
-        <div className="studio-sidebar-heading">
-          <span>LOBBIES</span>
+        <nav className="studio-section-nav" aria-label="Project sections">
           <button
             type="button"
-            aria-label="Create lobby"
-            title="Create lobby"
-            disabled={preview}
-            onClick={() => {
-              rememberDialogOpener()
-              setError("")
-              setShowLobbyForm(true)
-            }}
+            aria-pressed={section === "data"}
+            className={section === "data" ? "active" : ""}
+            onClick={() => setSection("data")}
           >
-            +
+            DATA
           </button>
-        </div>
-        <nav className="studio-lobby-list" aria-label="Lobbies">
-          {lobbies.map((lobby) => (
-            <div
-              className={`studio-lobby-item ${
-                activeLobbyID === lobby.id ? "active" : ""
-              }`}
-              key={lobby.id}
-            >
+          <button
+            type="button"
+            aria-pressed={section === "events"}
+            className={section === "events" ? "active" : ""}
+            onClick={() => setSection("events")}
+          >
+            EVENTS
+          </button>
+        </nav>
+        {section === "data" && (
+          <>
+            <div className="studio-sidebar-heading">
+              <span>LOBBIES</span>
               <button
                 type="button"
-                className="studio-lobby-select"
-                aria-pressed={activeLobbyID === lobby.id}
-                onClick={() => setActiveLobbyID(lobby.id)}
+                aria-label="Create lobby"
+                title="Create lobby"
+                disabled={busy || preview}
+                onClick={() => {
+                  rememberDialogOpener()
+                  setError("")
+                  setShowLobbyForm(true)
+                }}
               >
-                <span className="studio-lobby-dot" aria-hidden="true" />
-                <span className="studio-lobby-name">{lobby.name}</span>
-                <small aria-hidden="true">{lobby.yapCount}</small>
-                <span className="studio-sr-only">
-                  {lobby.yapCount} {lobby.yapCount === 1 ? "Yap" : "Yaps"}
-                </span>
-              </button>
-              <button
-                type="button"
-                className="studio-lobby-delete"
-                aria-label={`Delete lobby ${lobby.name}`}
-                title="Delete lobby"
-                disabled={preview}
-                onClick={() => void deleteLobby(lobby)}
-              >
-                ···
+                +
               </button>
             </div>
-          ))}
-          {lobbies.length === 0 && (
-            <p className="studio-no-lobbies">
-              No Lobbies yet. Create one to start adding data.
-            </p>
-          )}
-        </nav>
+            <nav className="studio-lobby-list" aria-label="Lobbies">
+              {lobbies.map((lobby) => (
+                <div
+                  className={`studio-lobby-item ${
+                    activeLobbyID === lobby.id ? "active" : ""
+                  }`}
+                  key={lobby.id}
+                >
+                  <button
+                    type="button"
+                    className="studio-lobby-select"
+                    aria-pressed={activeLobbyID === lobby.id}
+                    onClick={() => setActiveLobbyID(lobby.id)}
+                  >
+                    <span className="studio-lobby-dot" aria-hidden="true" />
+                    <span className="studio-lobby-name">{lobby.name}</span>
+                    <small aria-hidden="true">{lobby.yapCount}</small>
+                    <span className="studio-sr-only">
+                      {lobby.yapCount} {lobby.yapCount === 1 ? "Yap" : "Yaps"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="studio-lobby-delete"
+                    aria-label={`Delete lobby ${lobby.name}`}
+                    title="Delete lobby"
+                    disabled={preview}
+                    onClick={() => void deleteLobby(lobby)}
+                  >
+                    ···
+                  </button>
+                </div>
+              ))}
+              {lobbies.length === 0 && (
+                <p className="studio-no-lobbies">
+                  No Lobbies yet. Create one to start adding data.
+                </p>
+              )}
+            </nav>
+          </>
+        )}
         <footer className="studio-sidebar-footer">
           <button
             type="button"
             onClick={() => void exportBackup()}
             disabled={busy || preview}
+            title="Exports a readable, unencrypted JSON copy"
           >
-            EXPORT JSON BACKUP
+            EXPORT UNENCRYPTED JSON
           </button>
           <button
             type="button"
@@ -741,6 +969,9 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
           <div>
             <span className="studio-eyebrow">PROJECT</span>
             <strong>{project.name}</strong>
+            <small className="studio-save-hint">
+              Changes save as you make them.
+            </small>
           </div>
           <div className={`studio-local-badge ${preview ? "is-preview" : ""}`}>
             <i /> {preview ? "PREVIEW · SAMPLE DATA" : "LOCAL & ENCRYPTED"}
@@ -771,7 +1002,90 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
             </button>
           </div>
         )}
-        {activeLobby ? (
+        {projectLoading ? (
+          <div className="studio-no-selection" role="status">
+            <span className="studio-eyebrow">OPENING PROJECT</span>
+            <h1>Loading your Project.</h1>
+          </div>
+        ) : section === "events" ? (
+          <div className="studio-content">
+            <div className="studio-content-heading">
+              <div>
+                <span className="studio-eyebrow">
+                  APPEND-ONLY · {events.length} LOADED
+                </span>
+                <h1>
+                  Events<span>.</span>
+                </h1>
+                <p>
+                  A timestamped activity stream stored inside this encrypted
+                  Project. Events cannot be edited or deleted.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="studio-button studio-primary"
+                disabled={busy || eventsLoading || preview}
+                onClick={startCreateEvent}
+              >
+                + APPEND EVENT
+              </button>
+            </div>
+            {eventsLoading && events.length === 0 ? (
+              <p className="studio-events-empty" role="status">
+                Loading events…
+              </p>
+            ) : events.length === 0 ? (
+              <section className="studio-events-empty">
+                <h2>No events yet</h2>
+                <p>
+                  Append an event to start a permanent, ordered record of
+                  activity in this Project.
+                </p>
+                <button
+                  type="button"
+                  className="studio-button studio-primary"
+                  disabled={busy || eventsLoading || preview}
+                  onClick={startCreateEvent}
+                >
+                  APPEND YOUR FIRST EVENT
+                </button>
+              </section>
+            ) : (
+              <>
+                <section
+                  className="studio-event-list"
+                  aria-label="Project events"
+                >
+                  {events.map((item) => (
+                    <article className="studio-event-row" key={item.id}>
+                      <time dateTime={item.createdAt}>
+                        {new Date(item.createdAt).toLocaleString()}
+                      </time>
+                      <div>
+                        <strong>{item.kind}</strong>
+                        <small>
+                          {item.source || "No source"} · {item.id}
+                        </small>
+                      </div>
+                      <pre>{prettyJSON(item.data)}</pre>
+                    </article>
+                  ))}
+                </section>
+                {eventHasMore && (
+                  <button
+                    type="button"
+                    className="studio-button studio-load-more"
+                    disabled={eventsLoading}
+                    onClick={() => void loadMoreEvents()}
+                  >
+                    {eventsLoading ? "LOADING…" : "LOAD MORE EVENTS"}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        ) : activeLobby ? (
           <div className="studio-content">
             <div className="studio-content-heading">
               <div>
@@ -831,13 +1145,29 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
                       </td>
                     </tr>
                   ))}
-                  {yaps.length === 0 && (
+                  {yapsLoading ? (
                     <tr>
                       <td className="studio-empty-row" colSpan={3}>
-                        This Lobby is empty. Add a Yap to get started.
+                        Loading documents…
                       </td>
                     </tr>
-                  )}
+                  ) : yaps.length === 0 ? (
+                    <tr>
+                      <td className="studio-empty-row" colSpan={3}>
+                        <span>
+                          This Lobby is empty. Add a Yap to get started.
+                        </span>
+                        <button
+                          type="button"
+                          className="studio-button studio-primary"
+                          disabled={busy || preview}
+                          onClick={startCreateYap}
+                        >
+                          ADD FIRST YAP
+                        </button>
+                      </td>
+                    </tr>
+                  ) : null}
                 </tbody>
               </table>
             </div>
@@ -853,7 +1183,7 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
             <button
               type="button"
               className="studio-button studio-primary"
-              disabled={preview}
+              disabled={busy || preview}
               onClick={() => {
                 rememberDialogOpener()
                 setError("")
@@ -866,9 +1196,96 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
         )}
       </section>
 
-      {(projectAction || showLobbyForm || isNewYap || editingYap) && (
+      {(projectAction ||
+        showLobbyForm ||
+        showEventForm ||
+        isNewYap ||
+        editingYap) && (
         <div className="studio-modal-backdrop" role="presentation">
-          {showLobbyForm ? (
+          {projectAction ? (
+            <form
+              ref={dialogRef}
+              className="studio-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="studio-project-switch-title"
+              tabIndex={-1}
+              onSubmit={(event) => void submitProject(event)}
+            >
+              <button
+                className="studio-modal-close"
+                type="button"
+                aria-label="Close"
+                disabled={busy}
+                onClick={() => {
+                  setProjectAction(null)
+                  setPassphrase("")
+                }}
+              >
+                ×
+              </button>
+              <span className="studio-eyebrow">
+                {projectAction === "create" ? "NEW PROJECT" : "OPEN PROJECT"}
+              </span>
+              <h2 id="studio-project-switch-title">
+                {projectAction === "create"
+                  ? "Create another Project."
+                  : "Open another Project."}
+              </h2>
+              <p className="studio-path">{projectPath}</p>
+              {error && (
+                <div
+                  className="studio-inline-message studio-error"
+                  role="alert"
+                >
+                  {error}
+                </div>
+              )}
+              {projectAction === "create" && (
+                <label>
+                  PROJECT NAME
+                  <input
+                    autoFocus
+                    required
+                    maxLength={256}
+                    value={projectName}
+                    onChange={(event) => setProjectName(event.target.value)}
+                  />
+                </label>
+              )}
+              <label>
+                {projectAction === "open" ? "PASSPHRASE" : "NEW PASSPHRASE"}
+                <input
+                  autoFocus={projectAction === "open"}
+                  required
+                  type="password"
+                  autoComplete={
+                    projectAction === "open"
+                      ? "current-password"
+                      : "new-password"
+                  }
+                  value={passphrase}
+                  onChange={(event) => setPassphrase(event.target.value)}
+                />
+              </label>
+              <p className="studio-form-hint">
+                {projectAction === "open"
+                  ? "Enter the passphrase you chose when you created this Project. It unlocks the file and cannot be recovered if forgotten."
+                  : "This is the key to your Project file. Choose a long, unique passphrase and keep it safe; it cannot be recovered if lost."}
+              </p>
+              <button
+                type="submit"
+                className="studio-button studio-primary"
+                disabled={busy}
+              >
+                {busy
+                  ? "WORKING..."
+                  : projectAction === "create"
+                    ? "CREATE & OPEN"
+                    : "OPEN PROJECT"}
+              </button>
+            </form>
+          ) : showLobbyForm ? (
             <form
               ref={dialogRef}
               className="studio-modal"
@@ -982,6 +1399,77 @@ export default function Studio({ preview = false }: { preview?: boolean }) {
                 disabled={busy}
               >
                 {busy ? "SAVING..." : "SAVE YAP"}
+              </button>
+            </form>
+          ) : showEventForm ? (
+            <form
+              ref={dialogRef}
+              className="studio-modal studio-yap-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="studio-event-dialog-title"
+              tabIndex={-1}
+              onSubmit={(event) => void appendEvent(event)}
+            >
+              <button
+                className="studio-modal-close"
+                type="button"
+                aria-label="Close"
+                disabled={busy}
+                onClick={() => setShowEventForm(false)}
+              >
+                ×
+              </button>
+              <span className="studio-eyebrow">APPEND-ONLY EVENT</span>
+              <h2 id="studio-event-dialog-title">Record activity.</h2>
+              <p className="studio-form-hint">
+                Events are saved in this encrypted Project and cannot be changed
+                or removed later.
+              </p>
+              {error && (
+                <div
+                  className="studio-inline-message studio-error"
+                  role="alert"
+                >
+                  {error}
+                </div>
+              )}
+              <label>
+                EVENT KIND
+                <input
+                  autoFocus
+                  required
+                  maxLength={256}
+                  value={eventKind}
+                  onChange={(event) => setEventKind(event.target.value)}
+                  placeholder="e.g. note.created"
+                />
+              </label>
+              <label>
+                SOURCE (OPTIONAL)
+                <input
+                  maxLength={256}
+                  value={eventSource}
+                  onChange={(event) => setEventSource(event.target.value)}
+                  placeholder="e.g. studio"
+                />
+              </label>
+              <label>
+                JSON DATA
+                <textarea
+                  className="studio-json-input"
+                  required
+                  spellCheck={false}
+                  value={eventJSON}
+                  onChange={(event) => setEventJSON(event.target.value)}
+                />
+              </label>
+              <button
+                type="submit"
+                className="studio-button studio-primary"
+                disabled={busy}
+              >
+                {busy ? "APPENDING…" : "APPEND EVENT"}
               </button>
             </form>
           ) : null}

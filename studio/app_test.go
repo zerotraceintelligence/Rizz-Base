@@ -21,6 +21,7 @@ func TestProjectWorkflowAndBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if created.Name != "Workspace" {
 		t.Fatalf("created project name = %q, want Workspace", created.Name)
 	}
@@ -197,5 +198,51 @@ func TestProjectWorkflowAndBackup(t *testing.T) {
 	}
 	if len(yaps) != 0 {
 		t.Fatalf("Yaps after deletion = %#v, want none", yaps)
+	}
+}
+
+func TestStudioEventsWorkflow(t *testing.T) {
+	projectPath := filepath.Join(t.TempDir(), "events.rizz")
+	app := NewApp()
+	t.Cleanup(app.CloseProject)
+	if _, err := app.CreateProject(projectPath, "Events", "correct horse"); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := app.AppendEvent("note.created", "studio", `{"id":"one"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Kind != "note.created" || first.Source != "studio" || string(first.Data) != `{"id":"one"}` {
+		t.Fatalf("appended event = %#v", first)
+	}
+	if _, err := app.AppendEvent("note.created", "studio", "{"); err == nil {
+		t.Fatal("AppendEvent accepted invalid JSON")
+	}
+
+	second, err := app.AppendEvent("note.updated", "studio", `{"id":"two"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := app.QueryEvents(1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 1 || page.Events[0].ID != first.ID || page.NextCursor == "" {
+		t.Fatalf("first event page = %#v, want the first event and a next cursor", page)
+	}
+
+	page, err = app.QueryEvents(1, page.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 1 || page.Events[0].ID != second.ID || page.NextCursor != "" {
+		t.Fatalf("second event page = %#v, want the second event and no next cursor", page)
+	}
+	if _, err := app.QueryEvents(0, ""); err == nil {
+		t.Fatal("QueryEvents accepted a zero page size")
+	}
+	if _, err := app.QueryEvents(maxStudioEventPageSize+1, ""); err == nil {
+		t.Fatal("QueryEvents accepted a page size above the Studio limit")
 	}
 }

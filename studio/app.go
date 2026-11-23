@@ -18,6 +18,7 @@ import (
 )
 
 const maxBackupSize = 64 << 20
+const maxStudioEventPageSize = 100
 
 type App struct {
 	ctx         context.Context
@@ -295,6 +296,33 @@ func (a *App) DeleteYap(lobbyID, yapID string) error {
 	}
 	defer done()
 	return core.DeleteYap(path, passphrase, lobbyID, yapID, time.Second)
+}
+
+func (a *App) AppendEvent(kind, source, data string) (core.Event, error) {
+	if !json.Valid([]byte(data)) {
+		return core.Event{}, errors.New("event data must be valid JSON")
+	}
+	path, passphrase, done, err := a.projectCredentials()
+	if err != nil {
+		return core.Event{}, err
+	}
+	defer done()
+	return core.AppendEvent(path, passphrase, kind, source, json.RawMessage(data), time.Second)
+}
+
+func (a *App) QueryEvents(limit int, cursor string) (core.EventPage, error) {
+	if limit < 1 || limit > maxStudioEventPageSize {
+		return core.EventPage{}, fmt.Errorf("event page size must be between 1 and %d", maxStudioEventPageSize)
+	}
+	path, passphrase, done, err := a.projectCredentials()
+	if err != nil {
+		return core.EventPage{}, err
+	}
+	defer done()
+	return core.QueryEvents(path, passphrase, core.EventQueryOptions{
+		Limit:  &limit,
+		Cursor: cursor,
+	})
 }
 
 func (a *App) ExportBackup(path string) error {

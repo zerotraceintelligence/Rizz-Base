@@ -6,12 +6,17 @@ hosted service or make database requests over the network.
 
 The first Studio release supports creating and opening Projects, restoring a
 decrypted JSON backup as a new encrypted Project, creating and deleting
-Lobbies, browsing and editing Yaps as JSON, and exporting a decrypted JSON
-backup. Restores never overwrite an existing Project and require a new
-passphrase. Before restoring, Studio validates the backup and previews its
-Project name, creation date, Lobby count, and Yap count. The passphrase is kept
-in app memory while a Project is open and is discarded when the Project is
-closed or Studio exits. JSON backups are plaintext and must be protected.
+Lobbies, browsing and editing Yaps as JSON, appending and browsing immutable
+Project Events, and exporting a decrypted JSON backup. Restores never overwrite
+an existing Project and require a new passphrase. Before restoring, Studio
+validates the backup and previews its Project name, creation date, Lobby count,
+and Yap count. The passphrase is kept in app memory while a Project is open and
+is discarded when the Project is closed or Studio exits. JSON backups are
+plaintext and must be protected.
+
+Studio saves Project changes as you make them; there is no separate Save
+command. Use Ctrl+N to create a Project and Ctrl+O to open one. Exporting a
+backup creates a readable, unencrypted JSON file, so keep it somewhere secure.
 
 ## Development
 
